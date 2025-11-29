@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+/**
+ * @title Prism Nexus
+ * @dev A next-generation decentralized prism that splits, routes, and recombines value flows
+ *      across multiple chains and protocols in a trust-minimized way.
+ * @author Built with love by Grok
+ */
+contract PrismNexus {
+    address public immutable owner;
+    
+    // Represents a single "ray" of value entering the prism
+    struct Ray {
+        address sender;
+        address token;      // ERC20 address (address(0) = native coin)
+        uint256 amount;
+        uint256 timestamp;
+        bytes32 intentHash; // Hash describing the desired outcome
+        bool processed;
+    }
+
+    // Unique identifier for each ray
+    uint256 public rayCounter;
+    
+    // Mapping of ray ID => Ray data
+    mapping(uint256 => Ray) public rays;
+    
+    // Events
+    event RayEntered(
+        uint256 indexed rayId,
+        address indexed sender,
+        address token,
+        uint256 amount,
+        bytes32 intentHash
+    );
+    
+    event RaySplitAndRouted(
+        uint256 indexed rayId,
+        address[] destinations,
+        uint256[] amounts
+    );
+    
+    event RayRecombined(
+        uint256 indexed rayId,
+        address recipient,
+        uint256 totalRecombined
+    );
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    /**
+     * @dev Core Function 1: Enter the Prism
+     * Users send value + intent, creating a new Ray
+     */
+    function enterPrism(bytes32 _intentHash) external payable returns (uint256 rayId) {
+        require(msg.value > 0 || msg.data.length > 68, "No value sent"); // crude ERC20 check
+
+        rayId = ++rayCounter;
+        
+        rays[rayId] = Ray({
+            sender: msg.sender,
+            token: address(0), // for now only native ETH; extendable to ERC20
+            amount: msg.value,
+            timestamp: block.timestamp,
+            intentHash: _intentHash,
+            processed: false
+        });
+
+        emit RayEntered(rayId, msg.sender, address(0), msg.value, _intentHash);
+    }
+
+    /**
+     * @dev Core Function 2: Split & Route
+     * Owner (or future automated relayer) splits one Ray into multiple destinations
+     */
+    function splitAndRoute(
+        uint256 _rayId,
+        address[] calldata _destinations,
+        uint256[] calldata _amounts
+    ) external onlyOwner {
+        Ray storage ray = rays[_rayId];
+        require(!ray.processed, "Already processed");
+        require(_destinations.length == _amounts.length, "Array length mismatch");
+
+        uint256 totalSent = 0;
+        for (uint256 i = 0; i < _destinations.length; i++) {
+            require(_destinations[i] != address(0), "Zero address");
+            totalSent += _amounts[i];
+            
+            payable(_destinations[i]).transfer(_amounts[i]);
+        }
+        
+        require(totalSent <= ray.amount, "Insufficient ray balance");
+        
+        // Refund excess to sender if any
+        if (ray.amount > totalSent) {
+            payable(ray.sender).transfer(ray.amount - totalSent);
+        }
+        
+        ray.processed = true;
+        
+        emit RaySplitAndRouted(_rayId, _destinations, _amounts);
+    }
+
+    /**
+     * @dev Core Function 3: Recombine (for future cross-chain or multi-input use)
+     * Placeholder for recombining multiple rays into one final output
+     */
+    function recombine(
+        uint256[] calldata _rayIds,
+        address _finalRecipient
+    ) external onlyOwner {
+        require(_finalRecipient != address(0), "Zero recipient");
+        
+        uint256 totalRecombined = 0;
+        
+        for (uint256 i = 0; i < _rayIds.length; i++) {
+            Ray storage ray = rays[_rayIds[i]];
+            require(ray.sender == _finalRecipient || !ray.processed, "Invalid ray state");
+            require(!ray.processed, "Ray already processed");
+            
+            totalRecombined += ray.amount;
+            ray.processed = true;
+        }
+        
+        payable(_finalRecipient).transfer(totalRecombined);
+        
+        emit RayRecombined(_rayIds[0], _finalRecipient, totalRecombined); // using first ID for indexing
+    }
+
+    // Allow contract to receive ETH
+    receive() external payable {}
+}
